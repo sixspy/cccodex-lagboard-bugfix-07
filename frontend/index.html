@@ -59,8 +59,11 @@ createApp({
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const sources=ref([]), arrivals=ref([]), catchups=ref([]);
+    const watermarks=ref([]), replayCards=ref([]), replayJobs=ref([]), replayItems=ref([]);
+    const contentions=ref([]), recon=ref([]), auditRows=ref([]), replayMsg=ref('');
+    const replayForm=ref({source:'订单源', replay_day:'', rows:'2026-11-16T10:00:00,2026-11-16T12:00:00\n2026-11-16T10:30:00,2026-11-16T12:30:00'});
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','滞后分级','补齐恢复'];
+    const nav=['到达登记','滞后分级','补齐恢复','补采重放'];
     const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
     const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
@@ -88,6 +91,20 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
+      const w=await loadJson('/api/watermarks'); if(w===null) return;
+      watermarks.value=Array.isArray(w.items)?w.items:[];
+      const rc=await loadJson('/api/replay/cards'); if(rc===null) return;
+      replayCards.value=Array.isArray(rc.items)?rc.items:[];
+      const rj=await loadJson('/api/replay/jobs'); if(rj===null) return;
+      replayJobs.value=Array.isArray(rj.items)?rj.items:[];
+      const ri=await loadJson('/api/replay/items'); if(ri===null) return;
+      replayItems.value=Array.isArray(ri.items)?ri.items:[];
+      const ct=await loadJson('/api/replay/contentions'); if(ct===null) return;
+      contentions.value=Array.isArray(ct.items)?ct.items:[];
+      const rn=await loadJson('/api/reconciliation'); if(rn===null) return;
+      recon.value=Array.isArray(rn.items)?rn.items:[];
+      const au=await loadJson('/api/audit'); if(au===null) return;
+      auditRows.value=Array.isArray(au.items)?au.items:[];
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
     }
     async function recordArrival(){
@@ -97,8 +114,55 @@ createApp({
       await refresh();
     }
     async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
+    function wmOf(name){const w=watermarks.value.find(x=>x.source===name);return w?w.official_watermark:'—';}
+    async function postJson(url,body){
+      const r=await fetch(url,{method:'POST',headers:auth(),body:body===undefined?undefined:JSON.stringify(body)});
+      const j=await r.json().catch(()=>({}));
+      return {ok:r.ok,j};
+    }
+    async function createCard(){
+      replayMsg.value='';
+      const body={source:replayForm.value.source};
+      if(replayForm.value.replay_day) body.replay_day=replayForm.value.replay_day;
+      const {ok,j}=await postJson('/api/replay/cards',body);
+      replayMsg.value=ok?`切断卡 #${j.id} 已建（${j.path}路径·${j.status}）`:(j.detail||'建卡失败');
+      await refresh();
+    }
+    async function sealCard(card){
+      const {ok,j}=await postJson('/api/replay/cards/'+card.id+'/seal');
+      replayMsg.value=ok?`切断卡 #${j.id} 已封板，基准正式水位 ${j.cutoff_watermark||'空'}`:(j.detail||'封板失败');
+      await refresh();
+    }
+    async function openJob(card){
+      const {ok,j}=await postJson('/api/replay/jobs',{source:card.source,card_id:card.id});
+      replayMsg.value=ok?`回放席已占回放锁，作业 #${j.id}`:(j.detail||'占锁失败');
+      await refresh();
+    }
+    function parseRows(text){
+      return text.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
+        const [s,i]=l.split(',').map(x=>(x||'').trim());
+        return {source_clock:s,ingest_clock:i};
+      });
+    }
+    async function writeRows(job){
+      const rows=parseRows(replayForm.value.rows);
+      const {ok,j}=await postJson('/api/replay/jobs/'+job.id+'/rows',{rows});
+      replayMsg.value=ok?`回放作业 #${job.id} 写入 ${j.inserted} 条标签行`:(j.detail||'写入失败');
+      await refresh();
+    }
+    async function commitJob(job){
+      const {ok,j}=await postJson('/api/replay/jobs/'+job.id+'/commit');
+      replayMsg.value=ok?`作业 #${job.id} 已封档；正式水位保持 ${wmOf(job.source)}`:(j.detail||'封档失败');
+      await refresh();
+    }
+    async function abortJob(job){
+      const {ok,j}=await postJson('/api/replay/jobs/'+job.id+'/abort');
+      replayMsg.value=ok?`作业 #${job.id} 标签已整段撤销，正式史未动`:(j.detail||'撤销失败');
+      await refresh();
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup,
+      watermarks,replayCards,replayJobs,replayItems,contentions,recon,auditRows,replayMsg,replayForm,wmOf,createCard,sealCard,openJob,writeRows,commitJob,abortJob};
   },
   template:`
   <div v-if="!token" class="login">
@@ -156,6 +220,80 @@ createApp({
         <h3>补齐记录</h3>
         <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
         <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+      </div>
+      <div class="card" v-show="tab===3">
+        <h3 style="margin-bottom:8px">补采重放 · 回放切断（乙路径·同表贴标签）</h3>
+        <p style="color:#64748b;font-size:13px;margin:0 0 10px">
+          回放切断只走「回放抬正式水位切断」专册的乙路径：回放行写同表并贴回放标签，正式聚合按标签剔除；剔除失败则标签整段撤销。
+          甲乙互斥不得混用；切断卡须先封板再写入并封档；回放当天不许改口切断卡。
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div><label>源</label><select v-model="replayForm.source"><option v-for="s in sources" :value="s.name">{{s.name}}</option></select></div>
+          <div><label>回放日（默认今天）</label><input v-model="replayForm.replay_day" placeholder="2026-11-19"/></div>
+        </div>
+        <div><label>回放行（源时钟,摄入时钟 每行一条）</label>
+          <textarea v-model="replayForm.rows" rows="4" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-family:monospace"></textarea>
+        </div>
+        <button class="primary" @click="createCard">建回放切断卡</button>
+        <div class="err">{{replayMsg}}</div>
+        <table style="margin-top:12px"><thead><tr><th>切断卡</th><th>源</th><th>回放日</th><th>路径</th><th>封板基准水位</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody><tr v-for="c in replayCards" :key="c.id">
+            <td>#{{c.id}}</td><td>{{c.source}}</td><td>{{c.replay_day}}</td><td>{{c.path}}</td>
+            <td>{{c.cutoff_watermark||'—'}}</td><td>{{c.status}}</td>
+            <td>
+              <button class="ghost" v-if="c.status==='草稿'" @click="sealCard(c)">封板</button>
+              <button class="ghost" v-else-if="c.status==='封板' && !replayJobs.some(j=>j.card_id===c.id && j.status==='持锁')" @click="openJob(c)">占回放锁</button>
+            </td>
+          </tr></tbody>
+        </table>
+        <h3 style="margin:16px 0 6px">回放作业</h3>
+        <table><thead><tr><th>作业</th><th>源</th><th>席位</th><th>状态</th><th>开启</th><th>操作</th></tr></thead>
+          <tbody><tr v-for="j in replayJobs" :key="j.id">
+            <td>#{{j.id}}</td><td>{{j.source}}</td><td>{{j.seat}}</td><td>{{j.status}}</td><td>{{j.opened_at}}</td>
+            <td v-if="j.status==='持锁'">
+              <button class="ghost" @click="writeRows(j)">写入标签行</button>
+              <button class="ghost" @click="commitJob(j)">封档</button>
+              <button class="ghost" @click="abortJob(j)">撤销整段</button>
+            </td><td v-else>—</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <div class="card" v-show="tab===3" style="margin-top:14px">
+        <h3>回放列表</h3>
+        <table><thead><tr><th>源</th><th>源时钟</th><th>摄入时钟</th><th>滞后</th><th>级别</th><th>标签</th></tr></thead>
+          <tbody><tr v-for="r in replayItems" :key="r.id">
+            <td>{{r.source}}</td><td>{{r.source_clock}}</td><td>{{r.ingest_clock}}</td><td>{{r.lag_minutes}}</td><td>{{r.level}}</td>
+            <td style="color:#64748b">回放#{{r.batch_id}}</td>
+          </tr></tbody></table>
+      </div>
+      <div class="cards" style="grid-template-columns:repeat(2,1fr)">
+        <div class="card" v-show="tab===3">
+          <h3>水位读数（正式，剔除回放标签）</h3>
+          <table><thead><tr><th>源</th><th>正式水位</th><th>源目录牌</th></tr></thead>
+            <tbody><tr v-for="s in sources" :key="'wm'+s.id">
+              <td>{{s.name}}</td><td>{{wmOf(s.name)||'—'}}</td><td>{{s.output_mode}}</td>
+            </tr></tbody></table>
+        </div>
+        <div class="card" v-show="tab===3">
+          <h3>对账附页（正式/回放分列）</h3>
+          <table><thead><tr><th>源</th><th>正式水位</th><th>正式行</th><th>回放行</th><th>回放水位</th></tr></thead>
+            <tbody><tr v-for="x in recon" :key="'rc'+x.source">
+              <td>{{x.source}}</td><td>{{x.official_watermark||'—'}}</td><td>{{x.official_arrivals}}</td>
+              <td>{{x.replay_rows}}</td><td>{{x.replay_watermark||'—'}}</td>
+            </tr></tbody></table>
+        </div>
+      </div>
+      <div class="card" v-show="tab===3">
+        <h3>双计争用留痕</h3>
+        <table><thead><tr><th>源</th><th>后交席位</th><th>持锁方</th><th>动作</th><th>备注</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="x in contentions" :key="'ct'+x.id">
+            <td>{{x.source}}</td><td>{{x.seat}}</td><td>{{x.holder}}</td><td>{{x.action}}</td><td>{{x.note}}</td><td>{{x.created_at}}</td>
+          </tr></tbody></table>
+        <h3 style="margin:16px 0 6px">偏离审计（双计偏了）</h3>
+        <table><thead><tr><th>事件</th><th>详情</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="x in auditRows.slice(0,6)" :key="'au'+x.id">
+            <td>{{x.event}}</td><td>{{x.detail}}</td><td>{{x.created_at}}</td>
+          </tr></tbody></table>
       </div>
     </main>
   </div>`

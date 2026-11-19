@@ -1,14 +1,22 @@
-﻿name: lagboard
+﻿name: lagboard-bugfix-07
+
 
 services:
   app:
     build: .
     ports:
       - "10832:8000"
+    environment:
+      # 回放专册/封档归档落在回放专卷，不混入正式史
+      REPLAY_ARCHIVE_DIR: /app/data/replay_archive
     volumes:
-      - ./data:/app/data
+      # 库文件挂回放专卷：正式史与回放标签行同库分轨
+      - lagboard_replay:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10832/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
       interval: 5s
       timeout: 5s
       retries: 12
+
+volumes:
+  lagboard_replay:
